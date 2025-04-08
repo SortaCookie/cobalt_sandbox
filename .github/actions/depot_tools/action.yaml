@@ -23,7 +23,7 @@ runs:
           gclient validate
         shell: bash
       - name: gclient sync
-        run: gclient sync -v --shallow --no-history -r ${{ github.sha }}
+        run: gclient sync -v --shallow --no-history -r ${{ github.sha }} --cache-dir=/gclient-sync-cache
         shell: bash
       - name: Disable Chromium client side build telemetry
         run: build_telemetry opt-out
