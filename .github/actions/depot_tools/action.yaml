@@ -17,8 +17,26 @@ runs:
       - name: Add depot tools to PATH
         run: echo "$GITHUB_WORKSPACE/depot_tools" >> $GITHUB_PATH
         shell: bash
+      - name: Set GIT_CACHE_PATH
+        run: export GIT_CACHE_PATH=/gclient-sync-cache
+        shell: bash
+      # - name: Write test if doesn't exist
+      #   run: touch /gclient-sync-cache/helloworld.txt
+      #   shell: bash
+      - name: Write test if doesn't exist
+        run: |
+          ls -la /gclient-sync-cache
+          echo "0" >> /gclient-sync-cache/helloworld.txt
+          ls -la /gclient-sync-cache
+        shell: bash
+      - name: See whats there
+        run: ls /gclient-sync-cache
+        shell: bash
+      - name: Testing writing
+        run: sed -i 's/\([0-9]\+\)/$((\1+1))/g' /gclient-sync-cache/helloworld.txt && sleep 1000000
+        shell: bash
       - name: Generate gclient file
-        run: gclient config --name=src --custom-var=download_remoteexec_cfg=True --custom-var='rbe_instance="projects/cobalt-actions-prod/instances/default_instance"' https://github.com/${{ github.repository }}
+        run: gclient config --cache-dir=/gclient-sync-cache --name=src --custom-var=download_remoteexec_cfg=True --custom-var='rbe_instance="projects/cobalt-actions-prod/instances/default_instance"' https://github.com/${{ github.repository }}
         shell: bash
       - name: Set target OS for Android
         if: ${{ contains(matrix.platform, 'android') }}
