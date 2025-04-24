@@ -25,6 +25,7 @@ runs:
       #   shell: bash
       - name: Write test if doesn't exist
         run: |
+          ls -la /
           ls -la /gclient-sync-cache
           echo "0" >> /gclient-sync-cache/helloworld.txt
           ls -la /gclient-sync-cache
