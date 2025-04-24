@@ -26,24 +26,17 @@ jobs:
         run: |
           git config --global user.name "GitHub Release Automation"
           git config --global user.email "github@google.com"
-      # - name: Free space on Runner
-      #   run: |
-      #     df -h
-      #     ls -la /opt/hostedtoolcache/
-      #     sudo rm -rf /opt/hostedtoolcache/
-      #     df -h
       - name: Pull ${{ matrix.branch.milestone }} from upstream and apply diffs
         id: diff_step
         run: |
           # Add Chromium remote and pull the upstream branch.
-          echo "git remote add upstream https://chromium.googlesource.com/chromium/src"
           git remote add upstream https://chromium.googlesource.com/chromium/src
-          echo "git fetch --depth=1 upstream refs/branch-heads/${{ matrix.branch.branch_num }}:refs/remotes/branch/${{ matrix.branch.branch_num }}"
           git fetch --depth=1 upstream refs/branch-heads/${{ matrix.branch.branch_num }}:refs/remotes/branch/${{ matrix.branch.branch_num }}
-          echo "git diff HEAD branch/${{ matrix.branch.branch_num }} --binary > chromium_diff.patch"
           git diff HEAD branch/${{ matrix.branch.branch_num }} --binary > chromium_diff.patch
           echo "checking for diffs"
           [ -s chromium_diff.patch ] && echo "diff_present=true" >> $GITHUB_OUTPUT || echo "diff_present=false" >> $GITHUB_OUTPUT
+          [ -s chromium_diff.patch ] && echo "diff_present=true" || echo "diff_present=false"
+          ls -la
       - name: Apply and push diffs
         if: ${{ steps.diff_step.outputs.diff_present  == 'true' }}
         run: |
