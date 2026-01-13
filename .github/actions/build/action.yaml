@@ -15,17 +15,34 @@ runs:
   steps:
       - name: Clean out dir from previous runner
         run: |
-          rm -rf cobalt/src/out
+          rm -rf src/out
         shell: bash
       - name: GN gen
         run: |
-          cd cobalt/src
-          cobalt/build/gn.py -p ${{ matrix.platform }} -C ${{ matrix.config }}
+          cd src
+          cobalt/build/gn.py -p ${{ matrix.platform }} -C ${{ matrix.config }} --no-rbe --cc_wrapper=sccache
         shell: bash
-      - name: List GN args
+      - name: Set sccache debug env variable
         run: |
-          cd cobalt/src
+          echo "SCCACHE_ERROR_LOG=$HOME/tmp/sccache.log" >> $GITHUB_ENV
+          echo "SCCACHE_LOG=debug" >> $GITHUB_ENV
+        shell: bash
+      - name: List GN args and sccache
+        env:
+          SCCACHE_ERROR_LOG: "/tmp/sccache.log"
+          SCCACHE_LOG: "debug"
+        run: |
+          cd src
+          echo "$SCCACHE_GCS_KEY_PATH"
+          echo "$SCCACHE"
+          echo "$SCCACHE_GCS_BUCKET"
+          echo "$SCCACHE_GCS_RW_MODE"
+          echo "$SCCACHE_IDLE_TIMEOUT"
           gn args --list --short --overrides-only out/${{ matrix.platform }}_${{ matrix.config }}
+          sccache --stop-server || true
+          sleep 10
+          sccache --start-server
+          sccache --show-stats
         shell: bash
       - name: Get list of changed files
         if: github.event_name == 'pull_request'
@@ -34,7 +51,7 @@ runs:
           CHANGED_FILES_LIST: changed_files.txt
         run: |
           set -x
-          cd cobalt/src
+          cd src
           # GitHub's actions/checkout action, by default, checks out the merge commit when
           # a pull request event triggers a workflow. This merge commit represents the state
           # of the code as if the pull request had been merged into the base branch.
@@ -55,7 +72,7 @@ runs:
           DYN_TEST_TARGETS_JSON_FILE: out/${{ matrix.platform }}_${{ matrix.config }}/dyn_targets.json
         run: |
           set -x
-          cd cobalt/src
+          cd src
 
           if [[ ! -f "${STATIC_TEST_TARGETS_JSON_FILE}" ]]; then
             echo "Static test targets file not found at ${STATIC_TEST_TARGETS_JSON_FILE}. Skipping step."
@@ -95,39 +112,46 @@ runs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}_test_targets_json
-          path: cobalt/src/out/${{ matrix.platform }}_${{ matrix.config }}/test_targets.json
+          path: src/out/${{ matrix.platform }}_${{ matrix.config }}/test_targets.json
       - name: Ninja build test targets
         if: ${{ matrix.config == 'devel' && fromJSON(steps.calculate-test-targets.outputs.test_targets_count || 0) > 0 }}
         id: build-test-targets
         run: |
           set -ex
-          cd cobalt/src
+          cd src
           test_targets=$(echo '${{ steps.calculate-test-targets.outputs.test_targets_json }}' | jq -cr 'join(" ")')
           time autoninja -C out/${{ matrix.platform }}_${{ matrix.config }} ${test_targets}
         shell: bash
       - name: Ninja build
         env:
           TARGETS_JSON: ${{ inputs.targets }}
+          SCCACHE_ERROR_LOG: "/tmp/sccache.log"
+          SCCACHE_LOG: "debug"
+          GN_EXTRA_ARGS: "cc_wrapper=\"sccache\""
         run: |
           set -ex
-          cd cobalt/src
+          cd src
           TARGETS=$(echo "${TARGETS_JSON}" | jq -cr '. | join(" ")')
-          time autoninja -C out/${{ matrix.platform }}_${{ matrix.config }} ${TARGETS}
+          python cobalt/build/gn.py out/tvos-arm64_devel -p tvos-arm64-simulator -c devel --no-rbe --cc_wrapper=sccache
+          ninja -C out/tvos-arm64_devel ${TARGETS}
+          # time autoninja -C out/${{ matrix.platform }}_${{ matrix.config }} ${TARGETS}
+          sccache --show-stats
+          cat /tmp/sccache.log
         shell: bash
-      - name: Archive Android APKs
-        if: startsWith(matrix.platform, 'android') && matrix.config == 'qa'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.platform }} APKs
-          path: |
-            cobalt/src/out/${{ matrix.platform }}_qa/apks/*.apk
-            cobalt/src/out/${{ matrix.platform }}_qa/*_apk/*.apk
-            cobalt/src/out/${{ matrix.platform }}_qa/gen/build_info.json
-      - name: Upload Test Artifacts
-        if: steps.build-test-targets.outcome == 'success'
-        uses: ./cobalt/src/.github/actions/upload_test_artifacts
-        with:
-          test_artifacts_key: ${{ inputs.test_artifacts_key }}
-          upload_on_host_test_artifacts: ${{ inputs.upload_on_host_test_artifacts == 'true' || inputs.upload_web_test_artifacts == 'true' }}
-          upload_on_device_test_artifacts: ${{ inputs.upload_on_device_test_artifacts }}
-          test_targets_json_file: ${{ inputs.test_targets_json_file }}
+      # - name: Archive Android APKs
+      #   if: startsWith(matrix.platform, 'android') && matrix.config == 'qa'
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ${{ matrix.platform }} APKs
+      #     path: |
+      #       src/out/${{ matrix.platform }}_qa/apks/*.apk
+      #       src/out/${{ matrix.platform }}_qa/*_apk/*.apk
+      #       src/out/${{ matrix.platform }}_qa/gen/build_info.json
+      # - name: Upload Test Artifacts
+      #   if: steps.build-test-targets.outcome == 'success'
+      #   uses: ./src/.github/actions/upload_test_artifacts
+      #   with:
+      #     test_artifacts_key: ${{ inputs.test_artifacts_key }}
+      #     upload_on_host_test_artifacts: ${{ inputs.upload_on_host_test_artifacts == 'true' || inputs.upload_web_test_artifacts == 'true' }}
+      #     upload_on_device_test_artifacts: ${{ inputs.upload_on_device_test_artifacts }}
+      #     test_targets_json_file: ${{ inputs.test_targets_json_file }}

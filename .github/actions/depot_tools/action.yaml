@@ -17,24 +17,22 @@ runs:
       - name: Clear Cache and Clone Depot Tools
         if: inputs.use_cache != 'true'
         run: |
-          rm -rf /runner-cache/depot_tools /runner-cache/cobalt/.cipd_cache
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git /runner-cache/depot_tools
-          git -C /runner-cache/cobalt/src clean -ffdx
+          # Use $HOME instead of a root / path
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $HOME/depot_tools
+
+          # Add to PATH for subsequent steps
+          echo "$HOME/depot_tools" >> $GITHUB_PATH
         shell: bash
 
-      - name: Reset Cached Depot Tools
-        if: inputs.use_cache == 'true'
-        run: git -C /runner-cache/depot_tools reset --hard origin/main
-        shell: bash
-
-      - name: Add Depot Tools to PATH
-        run: echo "/runner-cache/depot_tools" >> $GITHUB_PATH
-        shell: bash
+      # - name: Reset Cached Depot Tools
+      #   if: inputs.use_cache == 'true'
+      #   run: git -C /runner-cache/depot_tools reset --hard origin/main
+      #   shell: bash
 
       - name: Bootstrap Bundled python3
         run: |
           # Must be run manually as $DEPOT_TOOLS_UPDATE is 0 in CI, skipping the bootstrap.
-          source /runner-cache/depot_tools/bootstrap_python3 && bootstrap_python3
+          source $HOME/depot_tools/bootstrap_python3 && bootstrap_python3
         shell: bash
 
       - name: Disable Chromium client side build telemetry
@@ -43,7 +41,6 @@ runs:
 
       - name: Run gclient config
         run: |
-          cd cobalt
           gclient config \
             --name=src \
             --custom-var=download_remoteexec_cfg=True \
@@ -51,18 +48,25 @@ runs:
             https://github.com/${{ github.repository }}
         shell: bash
 
-      - name: Set target OS for Android
-        if: contains(matrix.platform, 'android')
+      # - name: Set target OS for Android
+      #   if: contains(matrix.platform, 'android')
+      #   run: |
+      #     cd cobalt
+      #     echo "target_os=['android']" >> .gclient
+      #     gclient validate
+      #   shell: bash
+
+      - name: Set target OS for Mac
+        if: ${{ contains(matrix.platform, 'mac') }}
         run: |
-          cd cobalt
-          echo "target_os=['android']" >> .gclient
+          echo "target_os=['ios']" >> .gclient
           gclient validate
         shell: bash
 
       - name: Run gclient sync
         if: inputs.run_sync == 'true'
         run: |
-          cd cobalt
+          cd src
           gclient sync \
             --verbose \
             --shallow \
@@ -75,9 +79,9 @@ runs:
 
       - name: Run gclient runhooks
         if: inputs.run_sync == 'true'
-        env:
-          CIPD_CACHE_DIR: "/runner-cache/cobalt/.cipd_cache"
+        # env:
+        #   CIPD_CACHE_DIR: "/runner-cache/cobalt/.cipd_cache"
         run: |
-          cd cobalt
+          cd src
           gclient runhooks --verbose
         shell: bash
