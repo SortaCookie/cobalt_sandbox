@@ -1,0 +1,380 @@
+From cd1a9550ff0eadb262512656a54e8a9dc56765f3 Mon Sep 17 00:00:00 2001
+From: Eric Zhang <ericquinzhang@google.com>
+Date: Thu, 29 Jan 2026 12:00:33 -0800
+Subject: [PATCH] Enable sccache for TVOS targets and refactor workflow to use
+ main.yaml.
+
+This should turn on sccache for TVOS targets to improve compile times.
+Additionally, refactoring the tvos.yaml file to use main.yaml which is
+inline with the other workflows we have.
+
+Bug: 432823450
+Change-Id: I39bec6c6012cbb2033007f48cc267051fce284e8
+---
+ .github/actions/build/action.yaml        | 43 +++++++++++++++++++-
+ .github/actions/depot_tools/action.yaml  | 18 ++++----
+ .github/config/tvos-arm64-simulator.json |  5 +++
+ .github/workflows/main.yaml              | 52 ++++++++++++++++++++++--
+ .github/workflows/tvos.yaml              | 50 +++++++----------------
+ cobalt/build/gn.py                       |  2 +-
+ 6 files changed, 119 insertions(+), 51 deletions(-)
+
+diff --git a/.github/actions/build/action.yaml b/.github/actions/build/action.yaml
+index 61660c134f2a7..e94eca8131273 100644
+--- a/.github/actions/build/action.yaml
++++ b/.github/actions/build/action.yaml
+@@ -10,6 +10,9 @@ inputs:
+   test_targets_json_file:
+     description: "The path to the file the test targets are written to."
+     required: true
++  sccache_gcs_key_mac:
++    description: "The keyfile needed to access our sccache."
++    required: false
+ runs:
+   using: "composite"
+   steps:
+@@ -17,12 +20,49 @@ runs:
+         run: |
+           rm -rf cobalt/src/out
+         shell: bash
++      - name: Install sccache
++        if: ${{ contains(matrix.platform, 'tvos') }}
++        shell: bash
++        run: brew install sccache
++      - name: Configure sccache
++        if: ${{ contains(matrix.platform, 'tvos') }}
++        shell: bash
++        run: |
++          set -x
++          echo "${{ inputs.sccache_gcs_key_mac }}" | base64 --decode > "${HOME}/gcloud.json"
++          echo "SCCACHE_GCS_KEY_PATH=${HOME}/gcloud.json" >> $GITHUB_ENV
++          echo "SCCACHE=1" >> $GITHUB_ENV
++          echo "SCCACHE_GCS_BUCKET=cobalt-kokoro-sccache-mac" >> $GITHUB_ENV
++          echo "SCCACHE_GCS_RW_MODE=READ_WRITE" >> $GITHUB_ENV
++          echo "SCCACHE_IDLE_TIMEOUT=0" >> $GITHUB_ENV
++      - name: Install Google Cloud SDK
++        if: ${{ contains(matrix.platform, 'tvos') }}
++        run: |
++          set -x
++          if [[ "$(uname -m)" == "arm64" ]]; then
++            GCLOUD_ARCHIVE="google-cloud-cli-darwin-arm.tar.gz"
++          else
++            GCLOUD_ARCHIVE="google-cloud-cli-darwin-x86_64.tar.gz"
++          fi
++          mkdir -p "$GITHUB_WORKSPACE/.local"
++          cd ${{ runner.temp }}
++          curl -L -O "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/${GCLOUD_ARCHIVE}"
++          tar xf "${GCLOUD_ARCHIVE}" -C "$GITHUB_WORKSPACE/.local" --strip-components=1 google-cloud-sdk/bin google-cloud-sdk/lib
++          rm "${GCLOUD_ARCHIVE}"
++          export PATH="$GITHUB_WORKSPACE/.local/bin:$PATH"
++          gcloud --version
++        shell: bash
++      - name: Set Up Cloud SDK
++        if: ${{ contains(matrix.platform, 'tvos') }}
++        uses: isarkis/setup-gcloud@40dce7857b354839efac498d3632050f568090b6 # v1.1.1
++        with:
++          project_id: yt-cobalt
+       - name: GN gen
+         run: |
+           cd cobalt/src
+           gn_flags=()
+           if [[ "${{ matrix.platform }}" == *"tvos"* ]]; then
+-            gn_flags+=(--no-rbe --no-check)
++            gn_flags+=(--no-rbe --no-check --use-sccache)
+           fi
+           cobalt/build/gn.py -p ${{ matrix.platform }} -C ${{ matrix.config }} "${gn_flags[@]}"
+         shell: bash
+@@ -118,6 +158,7 @@ runs:
+           cd cobalt/src
+           TARGETS=$(echo "${TARGETS_JSON}" | jq -cr '. | join(" ")')
+           time autoninja -C out/${{ matrix.platform }}_${{ matrix.config }} ${TARGETS}
++          sccache --show-stats
+         shell: bash
+       - name: Archive Android APKs
+         if: startsWith(matrix.platform, 'android') && matrix.config == 'qa'
+diff --git a/.github/actions/depot_tools/action.yaml b/.github/actions/depot_tools/action.yaml
+index e1cfbcc3e14f3..1aa025fea2219 100644
+--- a/.github/actions/depot_tools/action.yaml
++++ b/.github/actions/depot_tools/action.yaml
+@@ -27,6 +27,7 @@ runs:
+       run: |
+         if [[ "${USE_CACHE}" == "false" ]]; then
+           echo "base_path=${{ runner.temp }}" >> ${GITHUB_OUTPUT}
++          echo "TMPDIR=${{ runner.temp }}" >> $GITHUB_ENV
+         else
+           echo "base_path=/runner-cache" >> ${GITHUB_OUTPUT}
+         fi
+@@ -106,21 +107,16 @@ runs:
+           "https://github.com/${{ github.repository }}"
+       shell: bash
+ 
+-    - name: Set target OS for Android
+-      if: contains(matrix.platform, 'android')
+-      run: |
+-        cd cobalt
+-        echo "target_os=['android']" >> .gclient
+-        gclient validate
++    - name: Set target OS
+       shell: bash
+-
+-    - name: Set target OS for tvOS
+-      if: contains(matrix.platform, 'tvos')
+       run: |
+         cd cobalt
+-        echo "target_os=['ios']" >> .gclient
++        if [[ "${{ matrix.platform }}" == *"android"* ]]; then
++          echo "target_os=['android']" >> .gclient
++        elif [[ "${{ matrix.platform }}" == *"tvos"* ]]; then
++          echo "target_os=['ios']" >> .gclient
++        fi
+         gclient validate
+-      shell: bash
+ 
+     - name: Run gclient sync
+       if: inputs.run_sync == 'true'
+diff --git a/.github/config/tvos-arm64-simulator.json b/.github/config/tvos-arm64-simulator.json
+index 4f799d51641f8..920cad336f690 100644
+--- a/.github/config/tvos-arm64-simulator.json
++++ b/.github/config/tvos-arm64-simulator.json
+@@ -1,4 +1,9 @@
+ {
++  "docker_service": "",
++  "use_cache": false,
++  "build_runners": [
++    "macos-latest"
++  ],
+   "platforms": [
+     "tvos-arm64-simulator"
+   ],
+diff --git a/.github/workflows/main.yaml b/.github/workflows/main.yaml
+index 4e4145e08f570..a03d79f086fb8 100644
+--- a/.github/workflows/main.yaml
++++ b/.github/workflows/main.yaml
+@@ -21,6 +21,8 @@ on:
+     secrets:
+       datadog_api_key:
+         required: false
++      SCCACHE_GCS_KEY_MAC:
++        required: false
+ 
+ concurrency:
+   # Cancel existing jobs on the same workflow, platform, and branch (or sha if merged).
+@@ -218,6 +220,13 @@ jobs:
+           # Create a zero-indexed list of shards for use by matrix, e.g. [0,1,2,3,4,5].
+           gtest_shards="[$(seq -s, 0 1 $((${num_gtest_shards} - 1)))]"
+           echo "gtest_shards=${gtest_shards}" >> $GITHUB_OUTPUT
++      - name: Set number Docker Requirement
++        id: set-use-cache
++        shell: bash
++        run: |
++          set -x
++          use_cache=$(cat ${GITHUB_WORKSPACE}/.github/config/${{ inputs.platform }}.json | jq -rc 'if .use_cache != null then .use_cache else true end')
++          echo "use_cache=${use_cache}" >> $GITHUB_OUTPUT
+       - name: Set Docker files checksum
+         id: set-docker-hash
+         shell: bash
+@@ -247,10 +256,12 @@ jobs:
+       test_dimensions: ${{ steps.set-test-dimensions.outputs.test_dimensions }}
+       test_attempts: ${{ steps.set-test-attempts.outputs.test_attempts }}
+       num_gtest_shards: ${{ steps.set-gtest-shards.outputs.num_gtest_shards }}
++      use_cache: ${{ steps.set-use-cache.outputs.use_cache }}
+ 
+   # Builds, tags, and pushes Cobalt docker build images to ghr.
+   docker-build-image:
+     needs: [initialize]
++    if: needs.initialize.outputs.use_cache == 'true'
+     runs-on: [self-hosted, chrobalt-linux-runner]
+     steps:
+       - name: Restore CI Essentials
+@@ -270,7 +281,7 @@ jobs:
+ 
+   # Builds, tags, and pushes Cobalt unit test image to ghr.
+   docker-unittest-image:
+-    if: needs.initialize.outputs.test_on_host == 'true'
++    if: needs.initialize.outputs.test_on_host == 'true' && needs.initialize.outputs.use_cache == 'true'
+     needs: [initialize]
+     runs-on: [self-hosted, chrobalt-linux-runner]
+     steps:
+@@ -291,7 +302,7 @@ jobs:
+ 
+   # Builds, tags, and pushes Cobalt web test image to ghr.
+   docker-webtest-image:
+-    if: needs.initialize.outputs.web_tests == 'true'
++    if: needs.initialize.outputs.web_tests == 'true' && needs.initialize.outputs.use_cache == 'true'
+     needs: [initialize]
+     runs-on: [self-hosted, chrobalt-linux-runner]
+     steps:
+@@ -310,8 +321,35 @@ jobs:
+     outputs:
+       docker_tag: ${{ steps.build-docker-image.outputs.docker_tag }}
+ 
+-  build:
++  build-ready:
+     needs: [initialize, docker-build-image]
++    runs-on: [self-hosted, chrobalt-linux-runner]
++    if: always()
++    steps:
++      - name: Build ready check
++        id: build-ready
++        env:
++          DOCKER_BUILD_IMAGE_RESULT: ${{ needs.docker-build-image.result }}
++          INITIALIZE_RESULT: ${{ needs.initialize.result }}
++          use_cache: ${{ needs.initialize.outputs.use_cache }}
++        run: |
++          # Skip entirely if initialize failed
++          if [ $INITIALIZE_RESULT != "success" ]; then
++            echo "success=false" >> $GITHUB_OUTPUT
++            exit 0
++          fi
++          # Skip if requires docker by docker-build-image failed
++          if [ $use_cache == "true" && $DOCKER_BUILD_IMAGE_RESULT != "success" ]; then
++            echo "success=false" >> $GITHUB_OUTPUT
++            exit 0
++          fi
++          echo "success=true" >> $GITHUB_OUTPUT
++    outputs:
++      success: ${{ steps.build-ready.outputs.success }}
++
++  build:
++    needs: [initialize, docker-build-image, build-ready]
++    if: always() && needs.build-ready.outputs.success == 'true'
+     permissions: {}
+     runs-on: ${{ fromJSON(needs.initialize.outputs.build_runners) }}
+     name: ${{ matrix.name }}_${{ matrix.config }}
+@@ -338,12 +376,14 @@ jobs:
+       TMPDIR: /__w/_temp
+     steps:
+       - name: Restore CI Essentials
++        if: ${{ needs.initialize.outputs.use_cache == 'true' }}
+         uses: actions/download-artifact@v4
+         with:
+           path: pre-run
+           name: ci-essentials-${{ inputs.platform }}
+ 
+       - name: Prepare Workspace for Checkout
++        if: ${{ needs.initialize.outputs.use_cache == 'true' }}
+         uses: ./pre-run/.github/actions/prepare-runner-cache
+ 
+       - name: Checkout
+@@ -360,11 +400,14 @@ jobs:
+         id: setup-depot-tools
+         continue-on-error: true
+         uses: ./cobalt/src/.github/actions/depot_tools
++        with:
++          use_cache: ${{ needs.initialize.outputs.use_cache }}
+ 
+       - name: Retry Depot Tools Set Up
+         if: steps.setup-depot-tools.outcome != 'success'
+         uses: ./cobalt/src/.github/actions/depot_tools
+         with:
++          use_cache: ${{ needs.initialize.outputs.use_cache }}
+           clear_cache: true
+ 
+       - name: Build Cobalt
+@@ -376,6 +419,7 @@ jobs:
+           targets: ${{ needs.initialize.outputs.targets }}
+           test_root_target: ${{ needs.initialize.outputs.test_root_target }}
+           test_targets_json_file: out/${{ matrix.platform }}_${{ matrix.config }}/test_targets.json
++          sccache_gcs_key_mac: ${{ secrets.SCCACHE_GCS_KEY_MAC }}
+ 
+       - name: Release Package
+         if:  (matrix.config == 'qa' || matrix.config == 'gold') && (needs.initialize.outputs.test_package == 'true' || needs.initialize.outputs.test_e2e == 'true' || needs.initialize.outputs.test_yts == 'true')
+@@ -561,11 +605,13 @@ jobs:
+       TEST_ARTIFACTS_KEY: ${{ matrix.platform }}_${{ matrix.name }}_test_artifacts
+     steps:
+       - name: Restore CI Essentials
++        if: ${{ needs.initialize.outputs.use_cache == 'true' }}
+         uses: actions/download-artifact@v4
+         with:
+           path: pre-run
+           name: ci-essentials-${{ inputs.platform }}
+       - name: Prepare Workspace for Checkout
++        if: ${{ needs.initialize.outputs.use_cache == 'true' }}
+         uses: ./pre-run/.github/actions/prepare-runner-cache
+       - name: Checkout
+         uses: actions/checkout@v4
+diff --git a/.github/workflows/tvos.yaml b/.github/workflows/tvos.yaml
+index 537dd738fa3e3..a3974402fe9d5 100644
+--- a/.github/workflows/tvos.yaml
++++ b/.github/workflows/tvos.yaml
+@@ -2,6 +2,13 @@ name: tvos
+ permissions: read-all
+ 
+ on:
++  workflow_dispatch:
++    inputs:
++      nightly:
++        description: 'Nightly workflow.'
++        required: true
++        type: boolean
++        default: false
+   pull_request:
+     branches:
+       - main
+@@ -10,42 +17,15 @@ on:
+       - main
+ 
+ jobs:
++  # This is default Chromium build config
+   tvos-arm64-simulator:
++    uses: ./.github/workflows/main.yaml
+     permissions:
+       packages: write
+       pull-requests: write
+-    runs-on: macos-latest
+-    timeout-minutes: 600
+-    strategy:
+-      fail-fast: false
+-      matrix:
+-        platform: [tvos-arm64-simulator]
+-        config: [devel]
+-    env:
+-      DEPOT_TOOLS_UPDATE: 0
+-      DEPOT_TOOLS_REPORT_BUILD: 0
+-      DEPOT_TOOLS_COLLECT_METRICS: 0
+-      DEPOT_TOOLS_METRICS: 0
+-      IS_CI: 1
+-    steps:
+-      - name: Checkout
+-        uses: actions/checkout@v4
+-        with:
+-          fetch-depth: 0
+-      - name: Read build config
+-        id: build-config
+-        run: |
+-          cd .github/config
+-          CONFIG_JSON=$(jq -cr '.' ${{ matrix.platform }}.json)
+-          echo "config_json=$CONFIG_JSON" >> "$GITHUB_OUTPUT"
+-      - name: Setup depot_tools
+-        uses: ./.github/actions/depot_tools
+-        with:
+-          clear_cache: 'false'
+-          use_cache: 'false'
+-      - name: Build
+-        uses: ./.github/actions/build
+-        with:
+-          targets: ${{ toJson(fromJson(steps.build-config.outputs.config_json).targets) }}
+-          test_root_target: ${{ fromJson(steps.build-config.outputs.config_json).test_root_target || 'null' }}
+-          test_targets_json_file: out/${{ matrix.platform }}_${{ matrix.config }}/test_targets.json
++    with:
++      platform: tvos-arm64-simulator
++      nightly: ${{ github.event.inputs.nightly }}
++    secrets:
++      datadog_api_key: ${{ secrets.DD_API_KEY }}
++      SCCACHE_GCS_KEY_MAC: ${{ secrets.SCCACHE_GCS_KEY_MAC }}
+diff --git a/cobalt/build/gn.py b/cobalt/build/gn.py
+index cbab9aeb9f7c0..f63122ebcc3c6 100755
+--- a/cobalt/build/gn.py
++++ b/cobalt/build/gn.py
+@@ -89,7 +89,7 @@ def write_build_args(build_args_path, platform_args_path, build_type, use_rbe,
+     if use_rbe:
+       f.write(f'use_remoteexec = true {gen_comment}\n')
+     if use_sccache:
+-      f.write(f'cc_wrapper = sccache {gen_comment}\n')
++      f.write(f'cc_wrapper = "sccache" {gen_comment}\n')
+     f.write(
+         f'rbe_cfg_dir = rebase_path("//cobalt/reclient_cfgs") {gen_comment}\n')
+     f.write(f'build_type = "{build_type}" {gen_comment}\n')
+-- 
+2.53.0.rc2.204.g2597b5adb4-goog
+
